@@ -1,18 +1,43 @@
 # Instagram Crawler
 
-A lightweight web dashboard for discovering publicly indexed Instagram profiles, posts and reels from keywords, hashtags and public account names.
+A standalone Instagram public-content discovery tool.
 
-## MVP
+## What it does
 
-- Keyword / hashtag / `@account` search
-- Direct Instagram links
-- Basic content classification: post, reel, profile
-- Result filtering
-- CSV export
-- Vercel serverless API
+- Search by keyword, hashtag, or public username
+- Discover Instagram URLs that are publicly indexed by search engines
+- Classify results as profile, post, or reel
+- Filter results in the dashboard
+- Export results to CSV
+- Run as a Vercel serverless app
 
-## Architecture note
+## Important scope
 
-The MVP uses a public search index as the discovery layer rather than attempting to bypass Instagram authentication, CAPTCHA, rate limits or access controls. It returns **publicly discoverable/indexed** Instagram URLs, not a claim of exhaustive Instagram-wide crawling.
+This project does **not** bypass Instagram authentication, CAPTCHA, private accounts, or platform access controls. The current collector uses publicly accessible search indexes to discover Instagram URLs.
 
-The collector is isolated in `api/search.js`, so a compliant Instagram data provider/API can be swapped in later without redesigning the UI.
+The collector is isolated behind `/api/search`, so a future compliant provider/API can replace the discovery layer without rebuilding the frontend.
+
+## Local development
+
+```bash
+npm install
+npm run dev
+```
+
+## Production build
+
+```bash
+npm run build
+```
+
+## API
+
+`GET /api/search?q=<query>&limit=<1-60>`
+
+Example response fields:
+
+- `title`
+- `url`
+- `account`
+- `kind`
+- `source`
