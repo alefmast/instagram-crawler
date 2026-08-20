@@ -1,7 +1,7 @@
 const MAX_RESULTS = 60;
 const PAGE_SIZE = 30;
 const MAX_PAGES_PER_QUERY = 2;
-const REQUEST_TIMEOUT_MS = 9000;
+const REQUEST_TIMEOUT_MS = 5000;
 
 function stripHtml(text = '') {
   return decodeEntities(text.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim());
@@ -95,7 +95,9 @@ async function fetchSearchPage(query, offset, headers) {
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
     const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}&s=${offset}`;
-    return await fetch(url, { headers, signal: controller.signal });
+    const response = await fetch(url, { headers, signal: controller.signal });
+    if (!response.ok) return null;
+    return await response.text();
   } finally {
     clearTimeout(timer);
   }
@@ -111,23 +113,34 @@ export default async function handler(req, res) {
   const results = [];
   const seen = new Set();
   const headers = {
-    'User-Agent': 'Mozilla/5.0 (compatible; InstagramCrawler/0.4; +https://github.com/alefmast/instagram-crawler)',
+    'User-Agent': 'Mozilla/5.0 (compatible; InstagramCrawler/0.5; +https://github.com/alefmast/instagram-crawler)',
     Accept: 'text/html,application/xhtml+xml'
   };
   const searchedQueries = [];
   let pagesFetched = 0;
+  let timedOut = false;
 
   try {
-    for (const query of queriesFor(q)) {
-      if (results.length >= limit) break;
-      for (let page = 0; page < MAX_PAGES_PER_QUERY && results.length < limit; page += 1) {
-        const offset = page * PAGE_SIZE;
-        searchedQueries.push({ query, page: page + 1 });
-        const response = await fetchSearchPage(query, offset, headers);
-        pagesFetched += 1;
-        if (!response.ok) continue;
-        collect(await response.text(), results, seen, limit);
-      }
+    const queries = queriesFor(q);
+
+    // Run each page of discovery queries concurrently so the Vercel function
+    // does not burn its execution budget on sequential upstream requests.
+    for (let page = 0; page < MAX_PAGES_PER_QUERY && results.length < limit; page += 1) {
+      const offset = page * PAGE_SIZE;
+      const batch = await Promise.all(
+        queries.map(async (query) => {
+          searchedQueries.push({ query, page: page + 1 });
+          try {
+            const html = await fetchSearchPage(query, offset, headers);
+            if (!html) return;
+            pagesFetched += 1;
+            collect(html, results, seen, limit);
+          } catch (error) {
+            if (error?.name === 'AbortError') timedOut = true;
+          }
+        })
+      );
+      void batch;
     }
 
     res.setHeader('Cache-Control', 's-maxage=60, stale-while-revalidate=300');
@@ -135,14 +148,12 @@ export default async function handler(req, res) {
       query: q,
       count: results.length,
       pagesFetched,
+      timedOut,
       searchedQueries,
       results
     });
   } catch (error) {
     console.error('instagram crawler error', error);
-    const message = error?.name === 'AbortError'
-      ? 'The search provider timed out. Please try again.'
-      : 'Unable to reach the public search provider right now.';
-    return res.status(502).json({ error: message });
+    return res.status(502).json({ error: 'Unable to reach the public search provider right now.' });
   }
 }
