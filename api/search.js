@@ -13,26 +13,53 @@ export default async function handler(req, res) {
     const providers = [searchIndex];
     if (meta.available()) providers.unshift(meta);
     const outputs = await Promise.all(providers.map(async provider => {
-      try { return { provider: provider.name, ...(await provider.discover({query:q,limit,maxPages:2}))}; }
-      catch (error) { return {provider:provider.name,results:[],pagesFetched:0,error:error.message||'Provider failed'}; }
+      try {
+        return { provider: provider.name, ...(await provider.discover({ query: q, limit, maxPages: 2 })) };
+      } catch (error) {
+        return { provider: provider.name, results: [], pagesFetched: 0, error: error.message || 'Provider failed' };
+      }
     }));
 
-    const seen = new Set(); const results=[]; let pagesFetched=0; let timedOut=false; const searchedQueries=[]; const errors=[];
+    const seen = new Set();
+    const results = [];
+    let pagesFetched = 0;
+    let timedOut = false;
+    const searchedQueries = [];
+    const errors = [];
+
+    // Consume every provider before truncating so a slow/secondary provider is not
+    // silently ignored just because an earlier provider filled the result limit.
     for (const output of outputs) {
-      pagesFetched += output.pagesFetched || 0; timedOut = timedOut || Boolean(output.timedOut);
-      searchedQueries.push(...(output.searchedQueries || []).map(x => typeof x === 'string' ? {query:x,provider:output.provider} : {...x,provider:output.provider}));
-      if (output.error) errors.push({provider:output.provider,error:output.error});
+      pagesFetched += output.pagesFetched || 0;
+      timedOut = timedOut || Boolean(output.timedOut);
+      searchedQueries.push(...(output.searchedQueries || []).map(x =>
+        typeof x === 'string' ? { query: x, provider: output.provider } : { ...x, provider: output.provider }
+      ));
+      if (output.error) errors.push({ provider: output.provider, error: output.error });
+
       for (const item of output.results || []) {
-        const key = String(item.url || '').replace(/\/$/,'').toLowerCase();
-        if (!key || seen.has(key)) continue; seen.add(key); results.push(item); if(results.length>=limit) break;
+        const key = String(item.url || '').replace(/\/$/, '').toLowerCase();
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        results.push(item);
       }
-      if(results.length>=limit) break;
     }
 
-    res.setHeader('Cache-Control','s-maxage=60, stale-while-revalidate=300');
-    return res.status(200).json({query:q,count:results.length,pagesFetched,timedOut,providers:outputs.map(x=>({name:x.provider,available:x.available!==false,error:x.error||null})),searchedQueries,errors,results});
+    const limitedResults = results.slice(0, limit);
+    res.setHeader('Cache-Control', 's-maxage=60, stale-while-revalidate=300');
+    return res.status(200).json({
+      query: q,
+      count: limitedResults.length,
+      totalFound: results.length,
+      pagesFetched,
+      timedOut,
+      providers: outputs.map(x => ({ name: x.provider, available: x.available !== false, error: x.error || null })),
+      searchedQueries,
+      errors,
+      results: limitedResults
+    });
   } catch (error) {
-    console.error('instagram crawler error',error);
-    return res.status(502).json({error:'Unable to reach discovery providers right now.'});
+    console.error('instagram crawler error', error);
+    return res.status(502).json({ error: 'Unable to reach discovery providers right now.' });
   }
 }
