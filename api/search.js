@@ -1,159 +1,38 @@
+import * as searchIndex from '../lib/providers/search-index.js';
+import * as meta from '../lib/providers/meta.js';
+
 const MAX_RESULTS = 60;
-const PAGE_SIZE = 30;
-const MAX_PAGES_PER_QUERY = 2;
-const REQUEST_TIMEOUT_MS = 5000;
-
-function stripHtml(text = '') {
-  return decodeEntities(text.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim());
-}
-
-function decodeEntities(text = '') {
-  return text
-    .replace(/&amp;/g, '&')
-    .replace(/&quot;/g, '"')
-    .replace(/&#x27;|&#39;/g, "'")
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>');
-}
-
-function classify(url) {
-  const path = new URL(url).pathname.toLowerCase();
-  if (/\/(reel|reels|tv)\//.test(path)) return 'reel';
-  if (/\/p\//.test(path)) return 'post';
-  return 'profile';
-}
-
-function cleanInstagramUrl(href) {
-  try {
-    const u = new URL(href, 'https://html.duckduckgo.com');
-    const candidate = u.hostname.includes('instagram.com') ? u.href : u.searchParams.get('uddg');
-    if (!candidate) return null;
-    const x = new URL(decodeURIComponent(candidate));
-    if (!x.hostname.toLowerCase().endsWith('instagram.com')) return null;
-    const path = x.pathname.replace(/\/+$/, '') || '/';
-    return `https://www.instagram.com${path}/`;
-  } catch {
-    return null;
-  }
-}
-
-function accountFromUrl(url) {
-  const p = new URL(url).pathname.split('/').filter(Boolean);
-  return p[0] && !['p', 'reel', 'reels', 'tv', 'explore'].includes(p[0].toLowerCase()) ? `@${p[0]}` : '';
-}
-
-function queriesFor(q) {
-  if (q.startsWith('@')) {
-    const user = q.slice(1).trim();
-    return [`site:instagram.com/${user}`, `site:instagram.com "${user}"`];
-  }
-  if (q.startsWith('#')) {
-    const tag = q.slice(1);
-    return [
-      `site:instagram.com "${q}"`,
-      `site:instagram.com/explore/tags/${tag}`,
-      `site:instagram.com/reel "${q}"`,
-      `site:instagram.com "${tag}"`
-    ];
-  }
-  return [
-    `site:instagram.com "${q}"`,
-    `site:instagram.com/reel "${q}"`,
-    `site:instagram.com/p "${q}"`,
-    `site:instagram.com "${q}" Instagram`
-  ];
-}
-
-function collect(html, results, seen, limit) {
-  const re = /<a[^>]*class=["'][^"']*result__a[^"']*["'][^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
-  let m;
-  while ((m = re.exec(html)) && results.length < limit) {
-    const url = cleanInstagramUrl(m[1]);
-    if (!url || url === 'https://www.instagram.com/' || seen.has(url)) continue;
-
-    const title = stripHtml(m[2]);
-    if (!title) continue;
-
-    const next = html.slice(m.index, m.index + 7000);
-    const sm = next.match(/class=["'][^"']*result__snippet[^"']*["'][^>]*>([\s\S]*?)<\/[^>]+>/i);
-    const snippet = sm ? stripHtml(sm[1]) : '';
-
-    seen.add(url);
-    results.push({
-      title: title.slice(0, 220),
-      snippet: snippet.slice(0, 400),
-      url,
-      account: accountFromUrl(url),
-      kind: classify(url),
-      source: 'public search index'
-    });
-  }
-}
-
-async function fetchSearchPage(query, offset, headers) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  try {
-    const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}&s=${offset}`;
-    const response = await fetch(url, { headers, signal: controller.signal });
-    if (!response.ok) return null;
-    return await response.text();
-  } finally {
-    clearTimeout(timer);
-  }
-}
 
 export default async function handler(req, res) {
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
-
   const q = String(req.query?.q || '').trim();
   const limit = Math.min(Math.max(Number(req.query?.limit || 20), 1), MAX_RESULTS);
   if (!q) return res.status(400).json({ error: 'Query is required' });
 
-  const results = [];
-  const seen = new Set();
-  const headers = {
-    'User-Agent': 'Mozilla/5.0 (compatible; InstagramCrawler/0.5; +https://github.com/alefmast/instagram-crawler)',
-    Accept: 'text/html,application/xhtml+xml'
-  };
-  const searchedQueries = [];
-  let pagesFetched = 0;
-  let timedOut = false;
-
   try {
-    const queries = queriesFor(q);
+    const providers = [searchIndex];
+    if (meta.available()) providers.unshift(meta);
+    const outputs = await Promise.all(providers.map(async provider => {
+      try { return { provider: provider.name, ...(await provider.discover({query:q,limit,maxPages:2}))}; }
+      catch (error) { return {provider:provider.name,results:[],pagesFetched:0,error:error.message||'Provider failed'}; }
+    }));
 
-    // Run each page of discovery queries concurrently so the Vercel function
-    // does not burn its execution budget on sequential upstream requests.
-    for (let page = 0; page < MAX_PAGES_PER_QUERY && results.length < limit; page += 1) {
-      const offset = page * PAGE_SIZE;
-      const batch = await Promise.all(
-        queries.map(async (query) => {
-          searchedQueries.push({ query, page: page + 1 });
-          try {
-            const html = await fetchSearchPage(query, offset, headers);
-            if (!html) return;
-            pagesFetched += 1;
-            collect(html, results, seen, limit);
-          } catch (error) {
-            if (error?.name === 'AbortError') timedOut = true;
-          }
-        })
-      );
-      void batch;
+    const seen = new Set(); const results=[]; let pagesFetched=0; let timedOut=false; const searchedQueries=[]; const errors=[];
+    for (const output of outputs) {
+      pagesFetched += output.pagesFetched || 0; timedOut = timedOut || Boolean(output.timedOut);
+      searchedQueries.push(...(output.searchedQueries || []).map(x => typeof x === 'string' ? {query:x,provider:output.provider} : {...x,provider:output.provider}));
+      if (output.error) errors.push({provider:output.provider,error:output.error});
+      for (const item of output.results || []) {
+        const key = String(item.url || '').replace(/\/$/,'').toLowerCase();
+        if (!key || seen.has(key)) continue; seen.add(key); results.push(item); if(results.length>=limit) break;
+      }
+      if(results.length>=limit) break;
     }
 
-    res.setHeader('Cache-Control', 's-maxage=60, stale-while-revalidate=300');
-    return res.status(200).json({
-      query: q,
-      count: results.length,
-      pagesFetched,
-      timedOut,
-      searchedQueries,
-      results
-    });
+    res.setHeader('Cache-Control','s-maxage=60, stale-while-revalidate=300');
+    return res.status(200).json({query:q,count:results.length,pagesFetched,timedOut,providers:outputs.map(x=>({name:x.provider,available:x.available!==false,error:x.error||null})),searchedQueries,errors,results});
   } catch (error) {
-    console.error('instagram crawler error', error);
-    return res.status(502).json({ error: 'Unable to reach the public search provider right now.' });
+    console.error('instagram crawler error',error);
+    return res.status(502).json({error:'Unable to reach discovery providers right now.'});
   }
 }
