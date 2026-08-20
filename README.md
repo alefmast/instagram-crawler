@@ -6,9 +6,13 @@ A standalone Instagram public-content discovery tool.
 
 - Search by keyword, hashtag, or public username
 - Discover Instagram URLs that are publicly indexed by search engines
+- Use multiple discovery queries and pages per query
+- Deduplicate discovered URLs
 - Classify results as profile, post, or reel
 - Filter results in the dashboard
 - Export results to CSV
+- Keep recent searches locally in the browser
+- Expose `/api/health` for deployment checks
 - Run as a Vercel serverless app
 
 ## Important scope
@@ -34,10 +38,16 @@ npm run build
 
 `GET /api/search?q=<query>&limit=<1-60>`
 
-Example response fields:
+Response includes:
 
-- `title`
-- `url`
-- `account`
-- `kind`
-- `source`
+- `query`
+- `count`
+- `pagesFetched`
+- `searchedQueries`
+- `results[]`
+
+Each result includes `title`, `url`, `account`, `kind`, and `source`.
+
+Health check:
+
+`GET /api/health`
