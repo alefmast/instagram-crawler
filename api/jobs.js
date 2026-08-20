@@ -34,11 +34,13 @@ async function runJob(job, origin) {
   job.status = 'running'; job.updatedAt = new Date().toISOString(); await saveJob(job);
   try {
     const url = new URL('/api/search', origin); url.searchParams.set('q', job.query); url.searchParams.set('limit', String(job.limit));
-    const response = await fetch(url); const data = await response.json();
+    const response = await fetch(url, { signal: AbortSignal.timeout(28000) });
+    const data = await response.json();
     if (!response.ok) throw new Error(data.error || 'Crawler failed');
     job.status = 'completed'; job.results = data.results || []; job.pagesFetched = data.pagesFetched || 0;
+    job.providers = data.providers || []; job.errors = data.errors || []; job.completedAt = new Date().toISOString();
   } catch (error) { job.status = 'failed'; job.error = error.message || 'Crawler failed'; }
-  job.updatedAt = new Date().toISOString(); await saveJob(job);
+  job.updatedAt = new Date().toISOString(); await saveJob(job); return job;
 }
 export default async function handler(req, res) {
   if (req.method === 'POST') {
@@ -48,8 +50,9 @@ export default async function handler(req, res) {
     const id = crypto.randomUUID();
     const job = { id, query: q, limit, status: 'queued', durable, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), results: [] };
     await saveJob(job);
-    void runJob(job, `${req.headers['x-forwarded-proto'] || 'https'}://${req.headers.host}`);
-    return res.status(202).json(job);
+    // Do not return before the job finishes: detached background work is not reliable in serverless runtimes.
+    const completed = await runJob(job, `${req.headers['x-forwarded-proto'] || 'https'}://${req.headers.host}`);
+    return res.status(completed.status === 'failed' ? 502 : 200).json(completed);
   }
   if (req.method === 'GET') {
     const id = String(req.query?.id || '');
